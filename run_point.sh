@@ -9,6 +9,7 @@
 #   ../bin/run_point.sh nscf         # stop after the nscf
 #   ../bin/run_point.sh wannier      # from the nscf output onwards
 #   ../bin/run_point.sh analyse      # only re-extract hoppings from _hr.dat
+#   ../bin/run_point.sh conf         # rebuild system.conf and the inputs only
 
 set -euo pipefail
 
@@ -27,7 +28,7 @@ grep -q "convergence has been achieved" scf.out || {
                 echo "       density from the SCF -- copy the whole out/."; exit 1; }
 
 # ---------------------------------------------------------------- config --
-if [ ! -f "$CONF" ]; then
+if [ ! -f "$CONF" ] || [ "$STAGE" = "conf" ]; then
     echo "=== deriving $CONF from scf.in ==="
     python3 "$BIN/scf2conf.py" -o "$CONF"
 fi
@@ -42,6 +43,12 @@ PW="${QE_BIN:+$QE_BIN/}pw.x"
 
 echo "=== generating inputs ==="
 python3 "$BIN/make_inputs.py" "$CONF"
+
+if [ "$STAGE" = "conf" ]; then
+    echo
+    echo "Config and inputs rebuilt. Nothing was run."
+    exit 0
+fi
 
 # ------------------------------------------------------------------ nscf --
 if [ "$STAGE" = "all" ] || [ "$STAGE" = "nscf" ]; then
