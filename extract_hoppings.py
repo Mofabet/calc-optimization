@@ -65,11 +65,15 @@ def parse_win(path):
     proj = block("projections")
     if proj is None:
         sys.exit(f"ERROR: no 'begin projections' in {path}")
-    counter = defaultdict(int)
     blocks = []
     for spec in proj:
         if spec.lower() in ("ang", "bohr", "random"):
             continue
+        # The atom counter restarts for every projection line. An element may
+        # legitimately appear more than once -- 'Gd:f' and 'Gd:d' are two
+        # blocks on the same four atoms -- and a shared counter would invent
+        # Gd5..Gd8 that no atom corresponds to.
+        counter = defaultdict(int)
         elem, orb = spec.split(":", 1)
         elem = elem.strip()
         orb = orb.strip()

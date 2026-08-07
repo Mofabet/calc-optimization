@@ -2,7 +2,7 @@
 # One z-point, from a finished SCF to averaged hoppings.
 #
 # Expects to be run inside a folder that already contains:
-#   scf.in   scf.out   out/
+#   scf.in   scf.out   out/          (the whole out/, not just the text files)
 #
 # Usage:
 #   ../bin/run_point.sh              # everything
@@ -17,7 +17,16 @@ BIN="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 STAGE="${1:-all}"
 CONF="system.conf"
 
-get() { grep -E "^$1=" "$CONF" | head -1 | cut -d= -f2- | sed 's/#.*//' | xargs; }
+# Read one key. Deliberately not "| xargs": with no command xargs runs echo,
+# and a value starting with -n or -e is then swallowed as an echo flag, which
+# silently turns "SRUN_OPTS=-n 16" into "16".
+get() {
+    local v
+    v=$(grep -E "^$1=" "$CONF" | head -1 | cut -d= -f2- | sed 's/[[:space:]]*#.*$//')
+    v="${v#"${v%%[![:space:]]*}"}"
+    v="${v%"${v##*[![:space:]]}"}"
+    printf '%s' "$v"
+}
 
 # ---------------------------------------------------------------- checks --
 [ -f scf.in ]  || { echo "ERROR: no scf.in here"; exit 1; }
@@ -40,6 +49,10 @@ TMIN=$(get TMIN)
 QE_BIN=$(get QE_BIN)
 SRUN_OPTS=$(get SRUN_OPTS)
 PW="${QE_BIN:+$QE_BIN/}pw.x"
+if ! command -v "$PW" >/dev/null 2>&1 && [ ! -x "$PW" ]; then
+    echo "ERROR: pw.x not found at '$PW'. Set QE_BIN in defaults.conf."
+    exit 1
+fi
 
 echo "=== generating inputs ==="
 python3 "$BIN/make_inputs.py" "$CONF"
@@ -53,6 +66,7 @@ fi
 # ------------------------------------------------------------------ nscf --
 if [ "$STAGE" = "all" ] || [ "$STAGE" = "nscf" ]; then
     echo "=== nscf ==="
+    echo "    srun $SRUN_OPTS $PW -in nscf.in"
     # shellcheck disable=SC2086
     srun $SRUN_OPTS "$PW" -in nscf.in > nscf.out
     grep -q "End of band structure calculation" nscf.out || {
@@ -63,17 +77,31 @@ fi
 
 # --------------------------------------------------------------- wannier --
 if [ "$STAGE" = "all" ] || [ "$STAGE" = "wannier" ]; then
-    echo "=== windows (from E_F) ==="
+    # A first, rough set of windows: -pp ignores dis_* entirely, so this only
+    # has to be syntactically present for the preprocessing step.
+    echo "=== windows (provisional, from E_F) ==="
     python3 "$BIN/set_windows.py" "$CONF"
 
-    echo "=== wannier: up, first pass to produce .eig ==="
-    "$BIN/run_wannier.sh" "$CONF" up || true
+    # Overlaps first for both spins, then the windows, then the minimisation.
+    # The .mmn/.amn/.eig files depend on the projections and the k-mesh, not on
+    # the windows, so they are computed once; validating the windows needs the
+    # .eig of both channels, and minimising before that validation is what made
+    # the first attempt fail on the frozen window.
+    echo "=== overlaps (pw2wannier90), both spins ==="
+    "$BIN/run_wannier.sh" "$CONF" both overlaps
 
-    echo "=== windows (validated against .eig) ==="
+    for s in up dn; do
+        if [ ! -s "${SYSTEM}_${s}.eig" ]; then
+            echo "STOPPING: ${SYSTEM}_${s}.eig was not produced."
+            exit 1
+        fi
+    done
+
+    echo "=== windows, validated against both .eig ==="
     python3 "$BIN/set_windows.py" "$CONF"
 
-    echo "=== wannier: both spins, clean run ==="
-    "$BIN/run_wannier.sh" "$CONF" both
+    echo "=== minimisation, both spins ==="
+    "$BIN/run_wannier.sh" "$CONF" both minimise
 fi
 
 # --------------------------------------------------------------- analyse --

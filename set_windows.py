@@ -1,5 +1,17 @@
 #!/usr/bin/env python3
 """
+Set the Wannier90 disentanglement windows from the actual Fermi level, and
+check that they are feasible before you burn a run on them.
+
+This is the step that was hand-tuned for GdFeSi (dis_win_min = 8.0 etc. were
+written for E_F = 13.78 eV). For Mn and Ru E_F will be somewhere else, so
+hardcoding those numbers would silently produce a bad Wannierisation.
+
+Two feasibility conditions, both checked per k-point:
+  * bands inside the outer  window  >= num_wann   (otherwise nothing to pick)
+  * bands inside the frozen window  <= num_wann   (otherwise W90 aborts)
+If either fails the window is walked until it fits, and the change is printed.
+
 Usage:
     set_windows.py CONF                      # after nscf, before the main run
     set_windows.py CONF --ef 13.78           # override the detected E_F
@@ -81,11 +93,21 @@ def main():
 
     ef = args.ef
     if ef is None:
-        ef, src = find_fermi("nscf.out", "scf.out")
+        # Prefer the SCF Fermi level. The NSCF mesh is often deliberately
+        # coarser than the SCF one -- it only has to resolve the Wannier
+        # Fourier transform, not integrate the density -- and a Fermi level
+        # from a coarse mesh is the less accurate of the two.
+        ef, src = find_fermi("scf.out", "nscf.out")
         if ef is None:
-            sys.exit("ERROR: no Fermi energy in nscf.out/scf.out. "
-                     "Run the nscf first, or pass --ef.")
+            sys.exit("ERROR: no Fermi energy in scf.out/nscf.out. "
+                     "Run the scf first, or pass --ef.")
         print(f"E_F = {ef:.4f} eV   (from {src})")
+        other, osrc = find_fermi("nscf.out" if src.startswith("scf")
+                                 else "scf.out")
+        if other is not None and abs(other - ef) > 0.05:
+            print(f"      {osrc} gives {other:.4f} eV, a difference of "
+                  f"{abs(other - ef):.3f} eV -- expected when the two meshes "
+                  f"differ; override with --ef if you prefer the other.")
     else:
         print(f"E_F = {ef:.4f} eV   (given)")
 
@@ -119,8 +141,18 @@ def main():
                 lo -= 0.05
                 guard += 1
             if guard:
-                notes.append(f"outer widened by {guard} steps "
-                             f"(min bands in window was below num_wann)")
+                notes.append(f"outer widened by {guard * 0.1:.1f} eV upward "
+                             f"and {guard * 0.05:.2f} eV downward to fit "
+                             f"num_wann")
+                if guard * 0.1 > 0.5:
+                    notes.append("!! that is a large widening. It usually "
+                                 "means num_wann is too big for the clean "
+                                 "part of the spectrum, and the window has "
+                                 "been pushed into a neighbouring manifold "
+                                 "(rare-earth 4f is the usual culprit). "
+                                 "Removing a projection is normally better "
+                                 "than swallowing those bands -- check "
+                                 "count_bands.py --histogram")
 
             # frozen window must hold at most num_wann bands everywhere
             guard = 0

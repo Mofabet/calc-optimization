@@ -45,7 +45,8 @@ def main():
     POLICY = ("PROJECTIONS", "DIS_WIN_LO", "DIS_WIN_HI", "DIS_FROZ_LO",
               "DIS_FROZ_HI", "DIS_NUM_ITER", "NUM_ITER", "PAIRS", "DMAX",
               "TMIN", "QE_BIN", "W90_BIN", "SRUN_OPTS", "KMESH_PRIMITIVE",
-              "NBND_WINDOW", "NBND_MARGIN", "MESH_BASE")
+              "NBND_WINDOW", "NBND_MARGIN", "MESH_BASE", "W90_SRUN_OPTS", "DIS_CONV_TOL",
+              "DIS_CONV_WINDOW", "CONV_TOL", "CONV_WINDOW")
     dflt = {}
     dpath = args.defaults
     if dpath is None:
@@ -263,6 +264,8 @@ DIS_WIN_HI={dflt.get('DIS_WIN_HI', '5.0')}
 DIS_FROZ_LO={dflt.get('DIS_FROZ_LO', '5.0')}
 DIS_FROZ_HI={dflt.get('DIS_FROZ_HI', '1.5')}
 DIS_NUM_ITER={dflt.get('DIS_NUM_ITER', '1000')}
+DIS_CONV_TOL={dflt.get('DIS_CONV_TOL', '1.0d-9')}
+DIS_CONV_WINDOW={dflt.get('DIS_CONV_WINDOW', '3')}
 NUM_ITER={dflt.get('NUM_ITER', '500')}
 
 PAIRS={pairs}
@@ -272,6 +275,7 @@ TMIN={dflt.get('TMIN', '0.02')}
 QE_BIN={dflt.get('QE_BIN', '')}
 W90_BIN={dflt.get('W90_BIN', '')}
 SRUN_OPTS={dflt.get('SRUN_OPTS', '-n 16')}
+W90_SRUN_OPTS={dflt.get('W90_SRUN_OPTS', '')}
 """
     if args.output == "-":
         sys.stdout.write(conf)

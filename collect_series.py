@@ -18,7 +18,9 @@ import os
 import re
 import sys
 
-BOHR = 0.529177210903
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import qeparse as qp
+
 
 
 def read_conf(path):
@@ -43,15 +45,25 @@ def read_avg(path, pair):
     return out
 
 
-def read_moments(path, tm, n_gd=2):
-    """site moments from scf.out, in the order the atoms appear in the input"""
-    if not os.path.exists(path):
+def read_moments(folder, tm):
+    """
+    Site moments of the transition metal, in Bohr magnetons.
+
+    Which sites are the transition metal is taken from scf.in rather than
+    assumed from a fixed atom ordering, because magnetic supercells put the
+    species in whatever order the structure was written in.
+    """
+    log_p = os.path.join(folder, "scf.out")
+    scf_p = os.path.join(folder, "scf.in")
+    if not os.path.exists(log_p):
         return None, None
-    log = open(path, errors="ignore").read()
+    log = open(log_p, errors="ignore").read()
+
     tot = None
     m = re.findall(r"total magnetization\s*=\s*([-0-9.]+)", log)
     if m:
         tot = float(m[-1])
+
     blocks = re.findall(r"Magnetic moment per site.*?\n((?:\s*atom.*\n)+)", log)
     if not blocks:
         return None, tot
@@ -60,9 +72,17 @@ def read_moments(path, tm, n_gd=2):
         mm = re.search(r"atom\s+(\d+).*?magn=\s*([-0-9.]+)", line)
         if mm:
             vals.append(float(mm.group(2)))
-    # atom order is Gd, Gd, TM, TM, Si, Si
-    tm_moments = vals[n_gd:n_gd + 2] if len(vals) >= n_gd + 2 else []
-    return tm_moments, tot
+
+    if os.path.exists(scf_p):
+        try:
+            st = qp.read_structure(qp.strip_comments(open(scf_p).read()))
+            if len(st["atoms"]) == len(vals):
+                sel = [v for (_, el, _), v in zip(st["atoms"], vals)
+                       if el == tm]
+                return sel, tot
+        except SystemExit:
+            pass
+    return None, tot
 
 
 def main():
@@ -82,10 +102,13 @@ def main():
         tm = c.get("TM", "?")
         pair = args.pair or "-".join(sorted([tm, "Si"]))
 
-        alat, coa = float(c["ALAT_BOHR"]), float(c["COA"])
-        z_si = float(c["Z_SI"])
-        a_ang = alat * BOHR
-        dist = a_ang * (0.25 + (z_si * coa) ** 2) ** 0.5
+        # D_TM_SI is measured from the real ATOMIC_POSITIONS by scf2conf.py.
+        # Older configs stored only the idealised Wyckoff parameters, so fall
+        # back to the 2-formula-unit formula when it is absent.
+        if "D_TM_SI" not in c:
+            skipped.append((d, "no D_TM_SI in system.conf -- regenerate it"))
+            continue
+        dist = float(c["D_TM_SI"])
 
         up_p = os.path.join(d, "avg_chem_up.dat")
         dn_p = os.path.join(d, "avg_chem_dn.dat")
@@ -101,9 +124,9 @@ def main():
         dsel = min(common, key=lambda x: abs(x - dist))
         tu, td = up[dsel], dn[dsel]
 
-        mom, tot = read_moments(os.path.join(d, "scf.out"), tm)
-        rows.append(dict(dir=d, z=z_si, d=dsel, tu=tu, td=td,
-                         tm=(tu + td) / 2, mom=mom, tot=tot, pair=pair))
+        mom, tot = read_moments(d, tm)
+        rows.append(dict(dir=d, d=dsel, tu=tu, td=td,
+                         tm=(tu + td) / 2, mom=mom, tot=tot, pair=pair, nat=c.get("NAT","")))
 
     if not rows:
         sys.exit("nothing to collect -- " +
@@ -112,16 +135,16 @@ def main():
     has_mom = any(r["mom"] for r in rows)
     tmlab = rows[0]["pair"].replace("-Si", "").replace("Si-", "")
 
-    hdr = "| z(Si) | d, Å | t_eff↑, eV | t_eff↓, eV | ⟨t_eff⟩, eV |"
-    sep = "|---:|---:|---:|---:|---:|"
+    hdr = "| structure | d(%s–Si), Å | t_eff↑, eV | t_eff↓, eV | ⟨t_eff⟩, eV |" % tmlab
+    sep = "|:---|---:|---:|---:|---:|"
     if has_mom:
         hdr += f" m({tmlab}), μB |"
         sep += "---:|"
     print(f"Пара {rows[0]['pair']}\n")
     print(hdr)
     print(sep)
-    for r in sorted(rows, key=lambda x: x["z"]):
-        line = (f"| {r['z']:.3f} | {r['d']:.3f} | {r['tu']:.3f} | "
+    for r in sorted(rows, key=lambda x: x["d"]):
+        line = (f"| {r['dir']} | {r['d']:.3f} | {r['tu']:.3f} | "
                 f"{r['td']:.3f} | {r['tm']:.3f} |")
         if has_mom:
             mom = r["mom"]
@@ -146,10 +169,10 @@ def main():
 
     if args.csv:
         with open(args.csv, "w") as f:
-            f.write("dir,z_si,d_ang,t_up,t_dn,t_mean,m_min,m_max,total_mag\n")
-            for r in sorted(rows, key=lambda x: x["z"]):
+            f.write("dir,nat,d_ang,t_up,t_dn,t_mean,m_min,m_max,total_mag\n")
+            for r in sorted(rows, key=lambda x: x["d"]):
                 mom = r["mom"] or []
-                f.write(f"{r['dir']},{r['z']:.6f},{r['d']:.4f},{r['tu']:.5f},"
+                f.write(f"{r['dir']},{r['nat']},{r['d']:.4f},{r['tu']:.5f},"
                         f"{r['td']:.5f},{r['tm']:.5f},"
                         f"{min(mom) if mom else ''},{max(mom) if mom else ''},"
                         f"{r['tot'] if r['tot'] is not None else ''}\n")
