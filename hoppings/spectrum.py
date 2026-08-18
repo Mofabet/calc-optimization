@@ -12,7 +12,7 @@ a line, splits them by spin channel, and with verbosity='high' follows each
 block with occupation numbers that must not be counted.
 
 Usage:
-    count_bands.py [scf.out] [--ef VALUE] [--margin 10]
+    spectrum.py [scf.out] [--ef VALUE] [--margin 10]
 """
 import argparse
 import re
@@ -91,7 +91,7 @@ def main():
         print(f"No eigenvalue blocks found in {args.log}.")
         print("The SCF must have been run with verbosity = 'high'; otherwise")
         print("eigenvalues are not written. Either rerun the last iteration")
-        print("with high verbosity, or skip this check -- set_windows.py")
+        print("with high verbosity, or skip this check -- 04_windows.py")
         print("validates the band count against the .eig file after the NSCF.")
         sys.exit(1)
     if ef is None:
@@ -129,7 +129,7 @@ def main():
         ratio = (best / nbnd_scf) ** 2
         print(f"  That makes the .mmn about {1 - ratio:.0%} smaller than "
               f"carrying all {nbnd_scf} bands.")
-    print("  Raise it if set_windows.py reports too few bands in the outer "
+    print("  Raise it if 04_windows.py reports too few bands in the outer "
           "window.")
 
     if args.histogram:

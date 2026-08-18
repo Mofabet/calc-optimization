@@ -9,9 +9,9 @@ the table in the same shape you used for GdFeSi:
     z(Si) | d(M-Si) | t_eff up | t_eff dn | <t_eff> | m(M)
 
 Usage:
-    collect_series.py z0.15 z0.19 z0.20 z0.22
-    collect_series.py z*                       --pair Mn-Si
-    collect_series.py z* --csv results.csv
+    09_series.py z0.15 z0.19 z0.20 z0.22
+    09_series.py z*                       --pair Mn-Si
+    09_series.py z* --csv results.csv
 """
 import argparse
 import os
@@ -102,7 +102,7 @@ def main():
         tm = c.get("TM", "?")
         pair = args.pair or "-".join(sorted([tm, "Si"]))
 
-        # D_TM_SI is measured from the real ATOMIC_POSITIONS by scf2conf.py.
+        # D_TM_SI is measured from the real ATOMIC_POSITIONS by 01_conf.py.
         # Older configs stored only the idealised Wyckoff parameters, so fall
         # back to the 2-formula-unit formula when it is absent.
         if "D_TM_SI" not in c:

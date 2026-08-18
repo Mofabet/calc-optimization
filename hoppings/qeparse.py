@@ -1,12 +1,22 @@
 #!/usr/bin/env python3
 """
-Shared parsing of Quantum ESPRESSO input files.
+Shared library: Quantum ESPRESSO and Wannier90 file readers.
 
-Used by scf2conf.py and make_inputs.py so that the structure is read from
-scf.in in exactly one place. Nothing here assumes a particular cell, atom
-count or composition.
+Every script imports from here so that a file format is parsed in exactly one
+place. Nothing here assumes a particular cell, atom count or composition.
+
+  read_structure          scf.in    -> cell, atoms, species
+  read_eigenvalue_blocks  scf.out   -> eigenvalues per k, per spin
+  supercell_multiplicity  structure -> repeats along each axis
+  parse_win               .win      -> lattice, atoms, projection blocks
+  parse_centres           _centres.xyz
+  assign_by_centres       centres   -> nearest atom label
+  read_hr                 _hr.dat   -> matrix element lines
+  read_conf / need        KEY=value config files
 """
+import math
 import re
+from collections import defaultdict
 import sys
 
 BOHR = 0.529177210903
@@ -248,3 +258,182 @@ def supercell_multiplicity(struct, tol=1e-4):
                 break
         out.append(found)
     return tuple(out)
+
+
+def read_kpoints_from_out(text):
+    """
+    -> [(kx, ky, kz)] in cartesian units of 2*pi/alat, in output order.
+
+    QE prints the k-point above each eigenvalue block. This is the only place
+    the coordinates appear in the output, so it is what a comparison against an
+    independently generated path has to be matched on.
+    """
+    out = []
+    for m in re.finditer(r"^\s*k\s*=\s*([-0-9.]+)\s+([-0-9.]+)\s+([-0-9.]+)"
+                         r".*?bands \(ev\)", text, re.M):
+        out.append(tuple(float(m.group(i)) for i in (1, 2, 3)))
+    return out
+
+
+def cart2pi_to_crystal(k, lattice, alat_ang):
+    """
+    Cartesian k in units of 2*pi/alat -> crystal (fractional) coordinates.
+
+    Uses b_i . a_j = 2*pi*delta_ij: the crystal component along b_i is the dot
+    product of the cartesian k with the real lattice vector a_i, both expressed
+    in units of alat.
+    """
+    return [sum(k[j] * lattice[i][j] / alat_ang for j in range(3))
+            for i in range(3)]
+
+
+# ---- Wannier90 files ----
+
+ORB_COUNT = {"s": 1, "p": 3, "d": 5, "f": 7,
+             "sp": 2, "sp2": 3, "sp3": 4, "sp3d": 5, "sp3d2": 6}
+
+
+def parse_win(path):
+    text = open(path).read()
+
+    def block(name):
+        m = re.search(rf"begin\s+{name}(.*?)end\s+{name}", text,
+                      re.S | re.I)
+        if not m:
+            return None
+        return [l.strip() for l in m.group(1).splitlines() if l.strip()
+                and not l.strip().startswith("!")]
+
+    # lattice
+    lines = block("unit_cell_cart")
+    if lines is None:
+        sys.exit(f"ERROR: no 'begin unit_cell_cart' in {path}")
+    scale = 1.0
+    if lines[0].lower() in ("ang", "angstrom"):
+        lines = lines[1:]
+    elif lines[0].lower() == "bohr":
+        scale, lines = BOHR, lines[1:]
+    lattice = [[float(x) * scale for x in l.split()[:3]] for l in lines[:3]]
+
+    # atoms
+    frac = block("atoms_frac")
+    cart = block("atoms_cart")
+    atoms = []                      # (element, fractional xyz)
+    if frac:
+        for l in frac:
+            p = l.split()
+            atoms.append((p[0], [float(x) for x in p[1:4]]))
+    elif cart:
+        inv = invert3(lattice)
+        start = 1 if cart[0].lower() in ("ang", "angstrom", "bohr") else 0
+        for l in cart[start:]:
+            p = l.split()
+            c = [float(x) for x in p[1:4]]
+            atoms.append((p[0], cart_to_frac(lattice, c)))
+    else:
+        sys.exit(f"ERROR: no atoms block in {path}")
+
+    # projections -> ordered list of (label, n_orb)
+    proj = block("projections")
+    if proj is None:
+        sys.exit(f"ERROR: no 'begin projections' in {path}")
+    blocks = []
+    for spec in proj:
+        if spec.lower() in ("ang", "bohr", "random"):
+            continue
+        # The atom counter restarts for every projection line. An element may
+        # legitimately appear more than once -- 'Gd:f' and 'Gd:d' are two
+        # blocks on the same four atoms -- and a shared counter would invent
+        # Gd5..Gd8 that no atom corresponds to.
+        counter = defaultdict(int)
+        elem, orb = spec.split(":", 1)
+        elem = elem.strip()
+        orb = orb.strip()
+        if orb.startswith("l="):
+            n_orb = 2 * int(re.match(r"l=(\d+)", orb).group(1)) + 1
+        elif ";" in orb:
+            n_orb = len(orb.split(";"))
+        else:
+            n_orb = ORB_COUNT.get(orb)
+        if n_orb is None:
+            sys.exit(f"ERROR: cannot count orbitals in '{spec}'")
+        for el, _ in atoms:
+            if el == elem:
+                counter[elem] += 1
+                blocks.append((f"{elem}{counter[elem]}", n_orb))
+    return lattice, atoms, blocks
+
+
+def parse_centres(path, num_wann):
+    lines = [l for l in open(path).read().splitlines() if l.strip()]
+    n_tot = int(lines[0].split()[0])
+    body = lines[2:2 + n_tot]
+    centres = [[float(x) for x in l.split()[1:4]]
+               for l in body if l.split()[0].upper() == "X"]
+    if len(centres) != num_wann:
+        return None
+    return centres
+
+
+def assign_by_centres(centres, atoms, lattice, labels):
+    """Map each Wannier centre to its nearest atomic image."""
+    cart = [frac_to_cart(lattice, f) for _, f in atoms]
+    out, worst = [], 0.0
+    for wc in centres:
+        best, best_d = None, 1e30
+        for ia, ac in enumerate(cart):
+            for i in (-1, 0, 1):
+                for j in (-1, 0, 1):
+                    for k in (-1, 0, 1):
+                        sh = frac_to_cart(lattice, [i, j, k])
+                        d = math.dist(wc, [ac[t] + sh[t] for t in range(3)])
+                        if d < best_d:
+                            best_d, best = d, ia
+        out.append(best)
+        worst = max(worst, best_d)
+    # atom index -> label like Mn1
+    counter = defaultdict(int)
+    names = []
+    for el, _ in atoms:
+        counter[el] += 1
+        names.append(f"{el}{counter[el]}")
+    return [names[i] for i in out], worst
+
+
+# ------------------------------------------------------------- hr.dat ----
+def read_hr(path):
+    with open(path) as f:
+        lines = f.readlines()
+    num_wann = int(lines[1].split()[0])
+    nrpts = int(lines[2].split()[0])
+    n_deg = math.ceil(nrpts / 15)
+    start = 3 + n_deg
+    # tolerate a degeneracy block written with a different line width
+    while start < len(lines) and len(lines[start].split()) != 7:
+        start += 1
+    return num_wann, nrpts, lines[start:]
+
+
+# ---------------------------------------------------------------- main ----
+
+
+# ---- config files ----
+
+def read_conf(path):
+    """KEY=value, '#' comments, whitespace-tolerant."""
+    conf = {}
+    for raw in open(path):
+        line = raw.split("#", 1)[0].strip()
+        if line and "=" in line:
+            k, v = line.split("=", 1)
+            conf[k.strip()] = v.strip()
+    return conf
+
+
+def need(conf, key):
+    v = conf.get(key)
+    if v is None:
+        sys.exit(f"ERROR: {key} missing from config")
+    if v.upper().startswith("FIXME"):
+        sys.exit(f"ERROR: {key} is still FIXME")
+    return v

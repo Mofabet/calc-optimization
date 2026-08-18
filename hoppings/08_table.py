@@ -3,8 +3,8 @@
 Merge the up and down averaged files into the final table.
 
 Usage:
-    make_table.py avg_chem_up.dat avg_chem_dn.dat --label GdMnSi
-    make_table.py ... --pair Mn-Si --nearest      # only the shortest bond
+    08_table.py avg_chem_up.dat avg_chem_dn.dat --label GdMnSi
+    08_table.py ... --pair Mn-Si --nearest      # only the shortest bond
 """
 import argparse
 from collections import OrderedDict

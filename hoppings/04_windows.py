@@ -13,9 +13,9 @@ Two feasibility conditions, both checked per k-point:
 If either fails the window is walked until it fits, and the change is printed.
 
 Usage:
-    set_windows.py CONF                      # after nscf, before the main run
-    set_windows.py CONF --ef 13.78           # override the detected E_F
-    set_windows.py CONF --dry-run            # report only, do not touch .win
+    04_windows.py CONF                      # after nscf, before the main run
+    04_windows.py CONF --ef 13.78           # override the detected E_F
+    04_windows.py CONF --dry-run            # report only, do not touch .win
 """
 import argparse
 import glob
@@ -23,15 +23,8 @@ import os
 import re
 import sys
 
-
-def read_conf(path):
-    conf = {}
-    for raw in open(path):
-        line = raw.split("#", 1)[0].strip()
-        if line and "=" in line:
-            k, v = line.split("=", 1)
-            conf[k.strip()] = v.strip()
-    return conf
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import qeparse as qp
 
 
 def find_fermi(*candidates):
@@ -67,16 +60,18 @@ def counts(per_k, lo, hi):
     return [sum(1 for e in ens if lo <= e <= hi) for ens in per_k.values()]
 
 
-def patch_win(path, vals, dry):
+def patch_win(path, vals, dry, stamp=""):
     text = open(path).read()
     for key, v in vals.items():
         new = f"{key:<12s} = {v:.4f}"
         text, n = re.subn(rf"^{key}\s*=.*$", new, text, count=1, flags=re.M)
         if n == 0:
             sys.exit(f"ERROR: no '{key}' line in {path}")
-    text = text.replace(
-        "! WINDOWS ARE PLACEHOLDERS -- run bin/set_windows.py after nscf",
-        "! windows set by bin/set_windows.py")
+    # Rewrite the marker whatever wording make_inputs used, so a .win never
+    # claims its windows are placeholders when they are not.
+    text = re.sub(r"^!.*placeholder.*$",
+                  f"! windows set by 04_windows.py, {stamp}",
+                  text, count=1, flags=re.M | re.I)
     if not dry:
         open(path, "w").write(text)
 
@@ -88,7 +83,7 @@ def main():
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
 
-    c = read_conf(args.conf)
+    c = qp.read_conf(args.conf)
     sysname = c["SYSTEM"]
 
     ef = args.ef
@@ -152,7 +147,7 @@ def main():
                                  "(rare-earth 4f is the usual culprit). "
                                  "Removing a projection is normally better "
                                  "than swallowing those bands -- check "
-                                 "count_bands.py --histogram")
+                                 "spectrum.py --histogram")
 
             # frozen window must hold at most num_wann bands everywhere
             guard = 0
@@ -179,7 +174,10 @@ def main():
 
         patch_win(win, {"dis_win_min": lo, "dis_win_max": hi,
                         "dis_froz_min": flo, "dis_froz_max": fhi},
-                  args.dry_run)
+                  args.dry_run,
+                  f"E_F={ef:.4f} eV, offsets "
+                  f"-{c['DIS_WIN_LO']}/+{c['DIS_WIN_HI']} outer, "
+                  f"-{c['DIS_FROZ_LO']}/+{c['DIS_FROZ_HI']} frozen")
 
         print(f"\n  {win}   num_wann = {num_wann}")
         print(f"    outer  [{lo:8.3f} , {hi:8.3f}]")

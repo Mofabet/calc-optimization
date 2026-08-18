@@ -13,7 +13,7 @@ appear in PROJECTIONS, or the Wannier functions cannot be localised), and where
 each manifold ends (that sets DIS_WIN_HI and DIS_WIN_LO).
 
 Usage:
-    pdos_summary.py [DIR] [--ef 13.2472] [--bin 1.0] [--lo -12] [--hi 11]
+    pdos.py [DIR] [--ef 13.2472] [--bin 1.0] [--lo -12] [--hi 11]
 """
 import argparse
 import glob
