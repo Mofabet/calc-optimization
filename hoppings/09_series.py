@@ -140,7 +140,7 @@ def main():
     if has_mom:
         hdr += f" m({tmlab}), μB |"
         sep += "---:|"
-    print(f"Пара {rows[0]['pair']}\n")
+    print(f"Pair {rows[0]['pair']}\n")
     print(hdr)
     print(sep)
     for r in sorted(rows, key=lambda x: x["d"]):
@@ -159,11 +159,11 @@ def main():
     if len(rows) > 1:
         s = sorted(rows, key=lambda x: x["d"])
         dt = (s[0]["tm"] - s[-1]["tm"]) / s[0]["tm"] * 100
-        print(f"\nОт d = {s[0]['d']:.3f} Å до {s[-1]['d']:.3f} Å "
-              f"⟨t_eff⟩ меняется на {dt:+.1f} %.")
+        print(f"\nFrom d = {s[0]['d']:.3f} Å to {s[-1]['d']:.3f} Å "
+              f"⟨t_eff⟩ changes by {dt:+.1f} %.")
 
     if skipped:
-        print("\nПропущено:")
+        print("\nSkipped:")
         for d, why in skipped:
             print(f"  {d}: {why}")
 

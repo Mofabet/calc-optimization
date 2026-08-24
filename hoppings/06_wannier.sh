@@ -30,10 +30,52 @@ W90=$(resolve "${W90_BIN:+$W90_BIN/}wannier90.x") \
 for spin in $( [ "$WHICH" = both ] && echo "up dn" || echo "$WHICH" ); do
     seed="${SYSTEM}_${spin}"
     for e in win mmn amn eig; do
-        [ -s "${seed}.${e}" ] || die "${seed}.${e} missing -- run 05_overlaps.sh"
+        [ -s "${seed}.${e}" ] || die "${seed}.${e} missing -- run 04_overlaps.sh"
     done
     grep -q "^dis_win_max *= *0\.0*$" "${seed}.win" \
-        && die "${seed}.win still has placeholder windows -- run 04_windows.py"
+        && die "${seed}.win still has placeholder windows -- run 05_windows.py"
+
+    # wannier90 answers a header mismatch with "param_read: mismatch in
+    # <seed>.eig" and nothing else, so check it here where the two numbers can
+    # be named. This bites whenever the .win is regenerated after the overlaps
+    # were computed: step 04 checks it, running 06 alone did not.
+    wantw=$(sed -n 's/^ *num_wann *= *\([0-9]*\).*/\1/p' "${seed}.win" | head -1)
+    wantb=$(sed -n 's/^ *num_bands *= *\([0-9]*\).*/\1/p' "${seed}.win" | head -1)
+    haveb=$(tail -1 "${seed}.eig" | awk '{print $1}')
+    havek=$(tail -1 "${seed}.eig" | awk '{print $2}')
+    amnb=$(sed -n '2p' "${seed}.amn" | awk '{print $1}')
+    amnw=$(sed -n '2p' "${seed}.amn" | awk '{print $3}')
+    if [ "$wantb" != "$haveb" ] || [ "$wantb" != "$amnb" ] \
+       || [ "$wantw" != "$amnw" ]; then
+        echo "ERROR: ${seed}.win does not match the overlaps." >&2
+        echo "         .win  num_bands=$wantb  num_wann=$wantw" >&2
+        echo "         .eig  num_bands=$haveb  ($havek k-points)" >&2
+        echo "         .amn  num_bands=$amnb  num_wann=$amnw" >&2
+        echo "       The .win was regenerated after the overlaps were made." >&2
+        echo "       Either pin NBND_NSCF=$haveb in system.conf and rerun" >&2
+        echo "       steps 02 and 05, which keeps the existing overlaps, or" >&2
+        echo "       rerun step 04 with --force to recompute them." >&2
+        exit 1
+    fi
+
+    # The overlaps carry their own band and function counts. wannier90 checks
+    # them too, but only after the job has reached a compute node, so a stale
+    # .win costs a queue slot to discover. Check here instead.
+    wb=$(sed -n 's/^ *num_bands *= *\([0-9]*\).*/\1/p' "${seed}.win" | head -1)
+    ww=$(sed -n 's/^ *num_wann *= *\([0-9]*\).*/\1/p' "${seed}.win" | head -1)
+    eb=$(tail -1 "${seed}.eig" | awk '{print $1}')
+    ab=$(sed -n '2p' "${seed}.amn" | awk '{print $1}')
+    aw=$(sed -n '2p' "${seed}.amn" | awk '{print $3}')
+    if [ "$wb" != "$eb" ] || [ "$wb" != "$ab" ] || [ "$ww" != "$aw" ]; then
+        echo "ERROR: ${seed}.win does not match the overlaps."
+        echo "         .win  num_bands $wb   num_wann $ww"
+        echo "         .eig  num_bands $eb"
+        echo "         .amn  num_bands $ab   num_wann $aw"
+        echo "       The .win was regenerated after the overlaps were computed."
+        echo "       Either set NBND_NSCF=$eb in system.conf and rerun step 02,"
+        echo "       or recompute the overlaps:  04_overlaps.sh $spin --force"
+        exit 1
+    fi
 
     keep=""
     if [ -n "$ITER" ]; then
@@ -61,9 +103,21 @@ for spin in $( [ "$WHICH" = both ] && echo "up dn" || echo "$WHICH" ); do
         /num_wann *:/         {nw=$NF}
         END{ if(oi>0) printf "  %s: Omega_I %.2f  Omega %.2f  ratio %.3f\n", s, oi, ot, ot/oi }
     ' "${seed}.wout"
-    grep -q "Wannierisation convergence criteria satisfied" "${seed}.wout" \
-        && say "$seed: localisation converged" \
-        || say "$seed: localisation hit the iteration limit"
-    grep -q "Maximum number of disentanglement iterations reached" "${seed}.wout" \
-        && say "$seed: disentanglement hit the iteration limit"
+    # Plain if, not `grep && say`: as the last statement of the loop a failing
+    # grep becomes the script's exit status, and a converged run -- where the
+    # "limit reached" message is absent -- would then look like a failure and
+    # stop the driver before the hoppings are extracted.
+    if grep -q "Wannierisation convergence criteria satisfied" "${seed}.wout"; then
+        say "$seed: localisation converged"
+    else
+        say "$seed: localisation hit the iteration limit"
+    fi
+    if grep -q "Maximum number of disentanglement iterations reached" \
+              "${seed}.wout"; then
+        say "$seed: disentanglement hit the iteration limit"
+    else
+        say "$seed: disentanglement converged"
+    fi
 done
+
+exit 0
