@@ -392,6 +392,9 @@ def compute_teff(h: HR, w: Wout, owner, cutoff):
 
 
 def onsite_levels(h: HR, w: Wout, owner):
+    """Per-atom on-site block. Kept per atom on purpose: in an AFM cell the
+    exchange splitting has opposite signs on the two sublattices and averaging
+    over an element cancels it."""
     i0 = np.where((h.rvecs == 0).all(axis=1))[0]
     if i0.size == 0:
         return {}
@@ -402,17 +405,17 @@ def onsite_levels(h: HR, w: Wout, owner):
         if g.size == 0:
             continue
         ev = np.linalg.eigvalsh(H0[np.ix_(g, g)])
-        per.setdefault(strip_index(a[0]), []).append(
-            (float(ev.mean()), float(ev.max() - ev.min()), int(g.size)))
-    return {k: (float(np.mean([x[0] for x in v])),
-                float(np.mean([x[1] for x in v])),
-                v[0][2], len(v)) for k, v in per.items()}
+        per[ia] = {"label": strip_index(a[0]), "eps": float(ev.mean()),
+                   "width": float(ev.max() - ev.min()), "nwf": int(g.size)}
+    return per
 
 
-def bands_check(h: HR, kpts, eig, win_inner, nk_max=BANDS_NK, seed=0):
+def bands_check(h: HR, kpts, eig, win_inner, win_outer, nk_max=BANDS_NK, seed=0):
     """
-    Wannier interpolation on the original k-mesh against DFT.
-    -> (median, 90th percentile, max |dE| in meV, fraction within 10 meV, n)
+    Wannier interpolation on the original k-mesh against DFT, split by region.
+    Inside the frozen window the reproduction is exact by construction, so the
+    informative numbers are the ones below and above it.
+    -> {"inside"/"below"/"above": (median meV, fraction within 10 meV, n)}
     """
     if kpts is None or eig is None or win_inner is None:
         return None
@@ -424,22 +427,49 @@ def bands_check(h: HR, kpts, eig, win_inner, nk_max=BANDS_NK, seed=0):
     R = h.rvecs.astype(float)
     inv_deg = 1.0 / h.deg
     lo, hi = win_inner
-    resid = []
+    olo, ohi = win_outer if win_outer else (-np.inf, np.inf)
+    parts = {"inside": [], "below": [], "above": []}
     for ik in sel:
         ph = np.exp(2j * np.pi * (kpts[ik] @ R.T)) * inv_deg
         Hk = np.tensordot(ph, h.ham, axes=(0, 0))
         Hk = 0.5 * (Hk + Hk.conj().T)
         ew = np.linalg.eigvalsh(Hk)
         ed = eig[:, ik]
-        ed = ed[(ed >= lo) & (ed <= hi)]
-        if ed.size == 0:
-            continue
-        resid.append(np.abs(ed[:, None] - ew[None, :]).min(axis=1))
-    if not resid:
+        for name, msk in (("inside", (ed >= lo) & (ed <= hi)),
+                          ("below", (ed >= olo) & (ed < lo)),
+                          ("above", (ed > hi) & (ed <= ohi))):
+            es = ed[msk]
+            if es.size:
+                parts[name].append(np.abs(es[:, None] - ew[None, :]).min(axis=1))
+    out = {}
+    for name, lst in parts.items():
+        if lst:
+            r = np.concatenate(lst) * 1000.0
+            out[name] = (float(np.median(r)), float((r < 10.0).mean()), int(r.size))
+    return out or None
+
+
+def bands_overall_frac(bc):
+    """Fraction within 10 meV over the whole outer window."""
+    if not bc:
         return None
-    r = np.concatenate(resid) * 1000.0     # meV
-    return (float(np.median(r)), float(np.percentile(r, 90)), float(r.max()),
-            float((r < 10.0).mean()), int(r.size))
+    num = sum(v[1] * v[2] for v in bc.values())
+    den = sum(v[2] for v in bc.values())
+    return num / den if den else None
+
+
+def moments_by_element(qe, atoms):
+    """QE atom index -> element label, using the .wout atom order.
+    Assumes ATOMIC_POSITIONS and the .win atoms block list atoms in the same
+    order, which is what 02_inputs.py produces."""
+    mom = qe.get("moments") or {}
+    if not mom or not atoms:
+        return {}
+    out = {}
+    for i, m in mom.items():
+        if 1 <= i <= len(atoms):
+            out.setdefault(strip_index(atoms[i - 1][0]), []).append(m)
+    return out
 
 
 # ----------------------------------------------------------------------------
@@ -546,11 +576,18 @@ def collect(folder, args):
     if not qe:
         res["notes"].append("no scf/nscf.out -- no E_F and no moments")
 
-    for pat in ("ICOHPLIST.lobster", "*/ICOHPLIST.lobster", "*/*/ICOHPLIST.lobster"):
-        hits = sorted(glob.glob(os.path.join(folder, pat)))
+    pats = ["ICOHPLIST.lobster", "*/ICOHPLIST.lobster", "*/*/ICOHPLIST.lobster"]
+    tries = []
+    if getattr(args, "icohp_glob", None):
+        tries.append(args.icohp_glob.format(name=res["name"], folder=folder))
+    tries += [os.path.join(folder, p) for p in pats]
+    for pat in tries:
+        hits = sorted(glob.glob(pat))
         if hits:
             res["icohp"] = parse_icohp(hits[0])
             break
+    else:
+        res["notes"].append("no ICOHPLIST.lobster -- use --icohp-glob to point at it")
 
     wouts = sorted(glob.glob(os.path.join(folder, "**", "*.wout"), recursive=True))
     if not wouts:
@@ -573,14 +610,23 @@ def collect(folder, args):
         eigp = (stem + ".eig") if os.path.exists(stem + ".eig") else \
             pick(sorted(glob.glob(os.path.join(d, "*.eig"))), sp)
         eig = parse_eig(eigp) if eigp else None
-        if eig is not None:
+        if eigp is None:
+            res["notes"].append(f"{sp}: no .eig next to {os.path.basename(wp)} "
+                                f"-- band counts and the band check are skipped")
+        elif eig is None:
+            res["notes"].append(f"{os.path.basename(eigp)}: unreadable or truncated "
+                                f"(nbnd*nkpt does not match the number of rows)")
+        else:
             e["bands_outer"] = bands_in_window(eig, w.win_outer)
             e["bands_inner"] = bands_in_window(eig, w.win_inner)
 
         if not args.no_hr:
             hrp = (stem + "_hr.dat") if os.path.exists(stem + "_hr.dat") else \
                 pick(sorted(glob.glob(os.path.join(d, "*_hr.dat"))), sp)
-            if hrp:
+            if hrp is None:
+                res["notes"].append(f"{sp}: no *_hr.dat next to "
+                                    f"{os.path.basename(wp)} -- no t_eff, no on-site")
+            else:
                 h = parse_hr(hrp)
                 if h is None:
                     res["notes"].append(f"{os.path.basename(hrp)}: could not be read")
@@ -598,8 +644,11 @@ def collect(folder, args):
                         winp = (stem + ".win") if os.path.exists(stem + ".win") else \
                             pick(sorted(glob.glob(os.path.join(d, "*.win"))), sp)
                         kp = parse_win_kpoints(winp) if winp else None
+                        if winp is None:
+                            res["notes"].append(f"{sp}: no .win -- no k-mesh, "
+                                                f"band check skipped")
                         e["bands"] = bands_check(h, kp, eig, w.win_inner,
-                                                 nk_max=args.bands_nk)
+                                                 w.win_outer, nk_max=args.bands_nk)
                     del h
         res["spins"][sp] = e
     return res
@@ -659,20 +708,25 @@ def render(results, args):
                 f"{bi[0]}-{bi[1]}" if bi else "-",
                 f"{bo[0]}-{bo[1]}" if bo else "-",
                 fnum(float(off.max()) if off is not None else None, 2),
-                fnum(bc[0], 2) if bc else "-",
-                f"{bc[3]*100:.0f}" if bc else "-",
+                fnum(bc["inside"][0], 2) if bc and "inside" in bc else "-",
+                fnum(bc["below"][0], 2) if bc and "below" in bc else "-",
+                fnum(bc["above"][0], 2) if bc and "above" in bc else "-",
+                f"{bands_overall_frac(bc)*100:.0f}" if bc else "-",
                 "yes" if w.converged else "NO"])
     L.append(table(["folder", "spin", "N_wf", "N_bnd", "Omega_I", "Omega", "ratio",
-                    "Om_I/N", "bnd frz", "bnd out", "offs", "dE meV", "<10meV %",
-                    "conv"], rows, aligns=["<", "<"]))
+                    "Om_I/N", "bnd frz", "bnd out", "offs", "dE in", "dE below",
+                    "dE above", "<10meV %", "conv"], rows, aligns=["<", "<"]))
     L.append("""
   ratio     Omega/Omega_I -- healthy corridor 1.10-1.50; constancy across the
             series matters more than the value itself
   Om_I/N    invariant part per function, A^2
   bnd frz   number of DFT bands inside the frozen window (min-max over k)
   offs      largest distance from a WF centre to its own atom, A
-  dE meV    median |E_Wannier - E_DFT| inside the frozen window on the original mesh
-  <10meV %  fraction of states within 10 meV""")
+  dE in     median |E_Wannier - E_DFT| inside the frozen window, meV. Exact by
+            construction, so a large value here means something is broken
+  dE below  the same below the frozen window -- this one is informative
+  dE above  the same above it, where the model has fewer states than DFT
+  <10meV %  fraction of states within 10 meV over the whole outer window""")
 
     # 2 --------------------------------------------------------------------
     L.append(section("2. Wannier function spreads"))
@@ -755,42 +809,71 @@ def render(results, args):
   metal at a fixed d carry a physical signal (the moment changes), not an error.""")
 
     # 5 --------------------------------------------------------------------
-    L.append(section("5. On-site levels (R = 0) and exchange splitting"))
+    L.append(section("5. On-site levels (R = 0, relative to E_F) and exchange splitting"))
     rows = []
     for r in results:
-        els = set()
-        for e in r["spins"].values():
-            els |= set(e["onsite"])
-        for el in sorted(els):
-            up = r["spins"].get("up", {}).get("onsite", {}).get(el)
-            dn = r["spins"].get("dn", {}).get("onsite", {}).get(el)
-            one = r["spins"].get("-", {}).get("onsite", {}).get(el)
-            src = up or dn or one
-            ex = (dn[0] - up[0]) if (up and dn) else None
-            rows.append([r["name"], el, src[2] if src else "-",
-                         fnum((up or one)[0] if (up or one) else None, 3),
-                         fnum(dn[0] if dn else None, 3), fnum(ex, 3),
-                         fnum((up or one)[1] if (up or one) else None, 3)])
-    L.append(table(["folder", "elem", "N_wf", "eps(up)", "eps(dn)", "D_ex",
-                    "block width"], rows, aligns=["<", "<"]))
+        ef = r["qe"].get("efermi")
+        up = r["spins"].get("up", {}).get("onsite", {}) or {}
+        dn = r["spins"].get("dn", {}).get("onsite", {}) or {}
+        one = r["spins"].get("-", {}).get("onsite", {}) or {}
+        base = up or one or dn
+        by_el = {}
+        for ia, rec in base.items():
+            by_el.setdefault(rec["label"], []).append(ia)
+        for el, ids in sorted(by_el.items()):
+            nwf = [base[i]["nwf"] for i in ids]
+            eu = [(up.get(i) or one.get(i, {})).get("eps") for i in ids]
+            eu = [x for x in eu if x is not None]
+            ed = [dn[i]["eps"] for i in ids if i in dn]
+            dex = [dn[i]["eps"] - up[i]["eps"] for i in ids if i in dn and i in up]
+            wid = [base[i]["width"] for i in ids]
+            off = (lambda v: v - ef) if ef is not None else (lambda v: v)
+            rows.append([
+                r["name"], el, len(ids),
+                str(min(nwf)) if min(nwf) == max(nwf) else f"{min(nwf)}-{max(nwf)}",
+                fnum(off(float(np.mean(eu))) if eu else None, 3),
+                fnum(off(float(np.mean(ed))) if ed else None, 3),
+                fnum(float(np.mean(np.abs(dex))) if dex else None, 3),
+                fnum(float(np.mean(dex)) if dex else None, 3),
+                fnum(float(np.mean(wid)), 3)])
+    L.append(table(["folder", "elem", "atoms", "N_wf", "eps(up)", "eps(dn)",
+                    "mean|D_ex|", "<D_ex>", "block width"], rows, aligns=["<", "<"]))
     L.append("""
-  D_ex = <eps_dn> - <eps_up> over the on-site block: a direct indicator of the
-  moment that costs no extra calculation. For an atom with N_wf = 5 this is a
-  clean d block; 'block width' is the crystal-field splitting of the levels.""")
+  D_ex = eps_dn - eps_up, computed PER ATOM and then averaged, because in an
+  AFM cell the two sublattices carry opposite splittings and an element-wide
+  average of eps would cancel them. mean|D_ex| is the exchange splitting;
+  <D_ex> near zero with a large mean|D_ex| is the signature of AFM order.
+  Energies are referenced to E_F. 'N_wf' must equal the number of projections
+  on that element (Gd:f+d = 12, TM:d = 5, Si:p+s = 4); a deviation means a
+  Wannier function was assigned to the wrong atom and t_eff is unsafe.
+  'block width' is the spread of the on-site levels -- crystal field for a
+  pure d block, but f-to-d separation for the mixed Gd block.""")
 
     # 6 --------------------------------------------------------------------
     L.append(section("6. Magnetic moments, energies, -ICOHP"))
+    mel = {}
+    for r in results:
+        atoms = next((e["wout"].atoms for e in r["spins"].values()
+                      if e["wout"].atoms), [])
+        mel[r["name"]] = moments_by_element(r["qe"], atoms)
+    elems_m = []
+    for d in mel.values():
+        for k in d:
+            if k not in elems_m:
+                elems_m.append(k)
     rows = []
     for r in results:
-        mom = r["qe"].get("moments") or {}
-        mx = max((abs(v) for v in mom.values()), default=None)
-        s = ", ".join(f"{i}:{v:+.2f}" for i, v in sorted(mom.items()))
-        rows.append([r["name"], fnum(r["qe"].get("efermi"), 4),
-                     fnum(r["qe"].get("etot"), 3),
-                     fnum(r["qe"].get("abs_magn"), 3), fnum(mx, 3),
-                     s[:52] + ("..." if len(s) > 52 else "")])
-    L.append(table(["folder", "E_F, eV", "E_tot, eV", "|M| cell", "max |m|",
-                    "per atom"], rows, aligns=["<", ">", ">", ">", ">", "<"]))
+        d = mel[r["name"]]
+        row = [r["name"], fnum(r["qe"].get("efermi"), 4),
+               fnum(r["qe"].get("etot"), 3), fnum(r["qe"].get("abs_magn"), 3)]
+        for el in elems_m:
+            v = d.get(el)
+            row.append(fnum(max(abs(x) for x in v), 3) if v else "-")
+        rows.append(row)
+    L.append(table(["folder", "E_F, eV", "E_tot, eV", "|M| cell"] +
+                   [f"max|m| {el}" for el in elems_m], rows,
+                   aligns=["<", ">", ">", ">"]))
+    L.append("\n  Per-element moments are matched to atoms through the .wout atom order.")
     if any(r["icohp"] for r in results):
         rows = []
         for r in results:
@@ -899,10 +982,15 @@ def flags(results, idx, meta):
             if e["tail"] is not None and e["tail"] > TAIL_WARN:
                 out.append(f"[tails] {tag}: distant H(R) reach {e['tail']*100:.0f} % of "
                            f"the near ones -- the functions are not localised enough")
-            if e["bands"] and e["bands"][0] > BANDS_MEDIAN_WARN:
-                out.append(f"[bands] {tag}: median |E_W-E_DFT| = {e['bands'][0]:.1f} meV "
-                           f"in the frozen window, only {e['bands'][3]*100:.0f} % of "
-                           f"states within 10 meV")
+            bc = e["bands"]
+            if bc and "inside" in bc and bc["inside"][0] > BANDS_MEDIAN_WARN:
+                out.append(f"[bands] {tag}: median |E_W-E_DFT| = "
+                           f"{bc['inside'][0]:.1f} meV INSIDE the frozen window, "
+                           f"where it should be near zero -- the disentanglement "
+                           f"did not reproduce the frozen states")
+            if bc and "below" in bc and bc["below"][0] > 10 * BANDS_MEDIAN_WARN:
+                out.append(f"[bands] {tag}: median |E_W-E_DFT| = "
+                           f"{bc['below'][0]:.1f} meV below the frozen window")
     if len(ratios) > 1:
         v = np.array([x[1] for x in ratios])
         med = float(np.median(v))
@@ -974,19 +1062,26 @@ def write_csv(results, path, args):
                 "max_centre_offset": float(e["offset"].max()) if e["offset"] is not None else None,
                 "hermiticity_ev": e["herm"], "tail_ratio": e["tail"],
                 "converged": w.converged,
-                "bands_med_mev": e["bands"][0] if e["bands"] else None,
-                "bands_p90_mev": e["bands"][1] if e["bands"] else None,
-                "bands_max_mev": e["bands"][2] if e["bands"] else None,
-                "bands_frac_10mev": e["bands"][3] if e["bands"] else None,
+                "bands_med_in_mev": e["bands"]["inside"][0]
+                    if (e["bands"] and "inside" in e["bands"]) else None,
+                "bands_med_below_mev": e["bands"]["below"][0]
+                    if (e["bands"] and "below" in e["bands"]) else None,
+                "bands_med_above_mev": e["bands"]["above"][0]
+                    if (e["bands"] and "above" in e["bands"]) else None,
+                "bands_frac_10mev": bands_overall_frac(e["bands"]),
                 "efermi": r["qe"].get("efermi"), "etot_ev": r["qe"].get("etot"),
                 "abs_magn": r["qe"].get("abs_magn"),
                 "tot_magn": r["qe"].get("tot_magn"),
             }
             for el, v in elem_spreads(w, e["owner"]).items():
                 row[f"spread_{el}"] = v
-            for el, v in e["onsite"].items():
-                row[f"onsite_{el}"] = v[0]
-                row[f"cfwidth_{el}"] = v[1]
+            by_el = {}
+            for ia, rec in e["onsite"].items():
+                by_el.setdefault(rec["label"], []).append(rec)
+            for el, recs in by_el.items():
+                row[f"onsite_{el}"] = float(np.mean([x["eps"] for x in recs]))
+                row[f"cfwidth_{el}"] = float(np.mean([x["width"] for x in recs]))
+                row[f"nwf_{el}"] = int(recs[0]["nwf"])
             for rec in e["teff"]:
                 if rec["shell"] <= args.shells:
                     row[f"d_{rec['pair']}_s{rec['shell']}"] = rec["dist"]
@@ -995,7 +1090,22 @@ def write_csv(results, path, args):
                 row[f"icohp_{rec['pair']}_{rec['dist']:.2f}"] = rec["icohp"]
             for i, v in sorted((r["qe"].get("moments") or {}).items()):
                 row[f"magn_{i}"] = v
+            for el, v in moments_by_element(r["qe"], w.atoms).items():
+                row[f"magn_max_{el}"] = max(abs(x) for x in v)
             rows.append(row)
+    # per-atom exchange splitting needs both spin rows of the same folder
+    by_folder = {}
+    for r in results:
+        up = r["spins"].get("up", {}).get("onsite", {}) or {}
+        dn = r["spins"].get("dn", {}).get("onsite", {}) or {}
+        acc = {}
+        for ia in set(up) & set(dn):
+            acc.setdefault(up[ia]["label"], []).append(dn[ia]["eps"] - up[ia]["eps"])
+        by_folder[r["name"]] = acc
+    for row in rows:
+        for el, v in by_folder.get(row["folder"], {}).items():
+            row[f"dex_abs_{el}"] = float(np.mean(np.abs(v)))
+            row[f"dex_signed_{el}"] = float(np.mean(v))
     keys = []
     for row in rows:
         for k in row:
@@ -1025,6 +1135,10 @@ def main():
                     help=f"pair radius for t_eff in A (default {PAIR_CUTOFF})")
     ap.add_argument("--shells", type=int, default=MAX_SHELLS,
                     help=f"shells per pair to report (default {MAX_SHELLS})")
+    ap.add_argument("--icohp-glob", default=None,
+                    help="extra glob for ICOHPLIST.lobster when LOBSTER lives "
+                         "outside the calculation folder; {name} expands to the "
+                         "folder name, e.g. '../lobster/{name}/ICOHPLIST.lobster'")
     ap.add_argument("--bands-nk", type=int, default=BANDS_NK,
                     help=f"k-points for the band check (default {BANDS_NK}, 0 = all)")
     args = ap.parse_args()

@@ -10,6 +10,9 @@ Stages, each runnable on its own:
 | 4 | `04_run_lobster.sh` | LOBSTER per point, prints the spilling lines |
 | 5 | `05_run_loposter.sh` | LOPOSTER per point |
 | 6 | `06_collect.py` | `icohp_series.csv` across the series |
+| 7 | `07_check_quality.sh` | spilling, electron count, size of the negative pDOS excursions |
+| 8 | `08_plot_cohp.py` | `cohp_<point>.pdf/.dat` + `icohp_<point>.tex` for ONE point |
+| 9 | `09_summary.py` | scans every folder with an ICOHPLIST and writes the series tables |
 
 ```
 chmod +x *.sh *.py
@@ -37,6 +40,23 @@ config file (different mesh, different points) needs no edits to the scripts.
   is comfortable. Stage 2 prints the count and flags it if `NBND` is short.
 * **Disk.** Explicit k-list plus `nosym` means the `.save` holds every
   k-point: expect tens of GB per point. Check quota before stage 3.
+
+Stages 7 and 8 are not part of `run_all.sh` -- run them by hand:
+
+```
+bash 07_check_quality.sh
+python3 08_plot_cohp.py lobster.conf z2074 Mn-Si Mn-Mn Gd-Mn
+for p in $POINTS; do python3 08_plot_cohp.py lobster.conf $p --species; done
+python3 09_summary.py
+```
+
+Stage 8 handles one point per call by design (it draws one multi-panel
+figure); loop over the points as above. Stage 9 needs no POINTS list -- it
+discovers every folder that has an ICOHPLIST.lobster, so new points appear
+automatically.
+
+Stage 8 infers the COHPCAR column layout from the column count and prints
+what it inferred. Check that line once against your file.
 
 ## After the run
 

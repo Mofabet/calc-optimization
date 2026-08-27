@@ -45,12 +45,20 @@ def load(path, pair, shell=1):
         e = per[r["folder"]]
         e.setdefault("d", f(r.get(dcol)))
         e.setdefault("t", {})[r["spin"]] = f(r.get(tcol))
-        m = [abs(f(v)) for k, v in r.items()
-             if k.startswith("magn_") and f(v) is not None]
-        if m:
-            e["m"] = max(m)
         tm = pair.split("-")[0]
         tm = tm if tm != "Si" else pair.split("-")[1]
+        # the moment of the atom the pair is about, not the largest in the cell
+        mv = f(r.get(f"magn_max_{tm}"))
+        if mv is None:
+            mv = max([abs(f(v)) for k, v in r.items()
+                      if k.startswith("magn_") and f(v) is not None], default=None)
+            if mv is not None:
+                e["m_fallback"] = True
+        if mv is not None:
+            e["m"] = mv
+        dx = f(r.get(f"dex_abs_{tm}"))
+        if dx is not None:
+            e["dex"] = dx
         on = f(r.get(f"onsite_{tm}"))
         if on is not None:
             e.setdefault("onsite", {})[r["spin"]] = on
@@ -73,7 +81,9 @@ def load(path, pair, shell=1):
             "t_up": e.get("t", {}).get("up"), "t_dn": e.get("t", {}).get("dn"),
             "icohp": e["icohp"][1] if e.get("icohp") else None,
             "m": e.get("m"),
-            "dex": (on["dn"] - on["up"]) if ("up" in on and "dn" in on) else None,
+            "dex": e.get("dex", (on["dn"] - on["up"])
+                         if ("up" in on and "dn" in on) else None),
+            "m_fallback": e.get("m_fallback", False),
         })
     pts.sort(key=lambda p: p["d"])
     return pts
@@ -147,9 +157,15 @@ def main():
     if args.title:
         ax1.set_title(args.title)
 
+    tm = args.pair.split("-")[0]
+    tm = tm if tm != "Si" else args.pair.split("-")[1]
+    if any(p["m_fallback"] for p in pts):
+        sys.stderr.write(f"warning: no magn_max_{tm} column, falling back to the "
+                         f"largest moment in the cell -- rerun 10_qc.py to get "
+                         f"per-element moments\n")
     m = np.array([p["m"] if p["m"] is not None else np.nan for p in pts])
     if np.isfinite(m).sum():
-        ax2.plot(d, m, "o-", ms=6, color="#2a7", label=r"$|m|$, $\mu_B$")
+        ax2.plot(d, m, "o-", ms=6, color="#2a7", label=rf"$|m|$({tm}), $\mu_B$")
     dex = np.array([p["dex"] if p["dex"] is not None else np.nan for p in pts])
     if np.isfinite(dex).sum() >= 2:
         axc = ax2.twinx()
@@ -173,7 +189,7 @@ def main():
             ax2.annotate("threshold", xy=(xc, ax2.get_ylim()[1] * 0.85),
                          xytext=(4, 0), textcoords="offset points", fontsize=8)
 
-    ax2.set_ylabel(r"$|m|$, $\mu_B$", color="#2a7")
+    ax2.set_ylabel(rf"$|m|$({tm}), $\mu_B$", color="#2a7")
     ax2.tick_params(axis="y", labelcolor="#2a7")
     ax2.set_xlabel(rf"$d$({args.pair.replace('-', '–')}), Å")
     for ax in (ax1, ax2):
